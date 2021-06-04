@@ -1,0 +1,3 @@
+([('BWFWAVrename',
+   '/Users/lex/PycharmProjects/BWFWAVrename/dist/BWFWAVrename',
+   'EXECUTABLE')],)
