@@ -1,0 +1,7 @@
+LICENSE
+README.md
+setup.py
+BWFWAVrename.egg-info/PKG-INFO
+BWFWAVrename.egg-info/SOURCES.txt
+BWFWAVrename.egg-info/dependency_links.txt
+BWFWAVrename.egg-info/top_level.txt
