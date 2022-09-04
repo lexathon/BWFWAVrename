@@ -5,6 +5,7 @@ import shutil
 import xml.etree.cElementTree as ET
 import BWFwave
 import numpy as np
+import tkinter
 import tkinter.filedialog as filedialog
 import tkinter.messagebox as messagebox
 import tkinter.ttk as ttk
@@ -51,7 +52,10 @@ class WavFile(object):
         return 0
 
     def _fileId(self):
-        # work backwards to '_'
+        # ignore trimming if polywav
+        if self._channels > 1:
+            return(self._originalFileName[:-4])
+        # otherwise work backwards to '_'
         trimLength = len(self._originalFileName)
         for l in self._originalFileName[::-1]:
             trimLength -= 1
@@ -226,6 +230,7 @@ class FilesList(object):
                     return
             popup = ProgressPopup(self._caller.master, 'Copying files...')
             popup.update()
+            popup.lift
             for x, wavFile in enumerate(self._list):
                 popup.progressBar['value'] = (10000 / len(self._list)) * x
                 popup.setFileLabel(wavFile.getNewFileName(0, style))
@@ -244,6 +249,7 @@ class FilesList(object):
                             for y in range(wavFile.getChannels()):
                                 splitPolywav(wavFile, y, self._newDirectory, wavFile.getNewFileName(y, style))
                                 popup.setFileLabel(wavFile.getNewFileName(y, style))
+                                print(wavFile.getNewFileName(y, style))
                                 popup.progressBar['value'] = ((10000 / len(self._list)) * x) \
                                                              + (10000 / len(self._list)) / (wavFile.getChannels()) * y
                                 popup.update()
@@ -281,8 +287,35 @@ def splitPolywav(wavFile, channel, newPath, newFileName):
     outwav.setnchannels(1)
     outwav.setnframes(sourcewav.getnframes())
     outwav.setbext(sourcewav.getbext())
-    outwav.setixml(sourcewav.getixml())
-    outwav.writeframesraw(channeldata.tostring())
+    #need to sort out a new ixml here...
+    tree = wavFile._xml
+    root = tree.getroot()
+    tracklistEl = root.find('TRACK_LIST')
+    tracklistEl.clear()
+    trackCountEl = ET.Element('TRACK_COUNT')
+    trackCountEl.text = '1'
+    trackCountEl.tail = '\n'
+    trackEl = ET.Element('TRACK')
+    trackEl.tail = '\n'
+    channelIndexEl = ET.SubElement(trackEl, 'CHANNEL_INDEX')
+    channelIndexEl.text = wavFile._tracks[channel].getChannel()
+    channelIndexEl.tail = '\n'
+    interleaveIndexEl = ET.SubElement(trackEl, 'INTERLEAVE_INDEX')
+    interleaveIndexEl.text = '1'
+    interleaveIndexEl.tail = '\n'
+    nameEl = ET.SubElement(trackEl, 'NAME')
+    nameEl.text = wavFile._tracks[channel].getName()
+    nameEl.tail = '\n'
+    tracklistEl.append(trackCountEl)
+    tracklistEl.append(trackEl)
+    output = '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root).decode('utf-8') + '                '
+    #output must be even in length for wav to work:
+    if (len(output) % 2 != 0):
+        output = output + ' '
+    #end of new xml section
+    #outwav.setixml(sourcewav.getixml()) -- old xml line - just duplicate the original
+    outwav.setixml(bytes(output, 'utf-8'))
+    outwav.writeframesraw(channeldata.tobytes())
     outwav.close()
     sourcewav.close()
 
@@ -450,6 +483,7 @@ class ProgressPopup(Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.cancel)
         self.geometry("+%d+%d" % (master.winfo_rootx() + 100, master.winfo_rooty() + 200))
         self.initial_focus.focus_set()
+        self.lift()
         self.wait_visibility(window=None)
     #
     # construction hooks
