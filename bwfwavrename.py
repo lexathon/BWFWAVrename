@@ -1,171 +1,484 @@
 #! python
 
-import re
 import os
 import shutil
-import sys
 import xml.etree.cElementTree as ET
-from Tkinter import *
-import tkFileDialog
-import tkMessageBox
-import ttk
+import BWFwave
+import numpy as np
+import tkinter.filedialog as filedialog
+import tkinter.messagebox as messagebox
+import tkinter.ttk as ttk
+from tkinter import *
 
-class wavFile(object):
-	def __init__(self, originalFileName, directory):
-		self.originalFileName = originalFileName
-		self.directory = directory
-		self.xml = ET.ElementTree(ET.fromstring(xmlExtract(os.path.join(directory, originalFileName))))
-		self.polywav = 0
-		self.interleaveIndex = 1
-		self.trackCount = 0
-		#The test for polywav and type... TRACK_COUNT > 1. Polywav. CURRENT_FILENAME != fileName. Split.
-		for elem in self.xml.iterfind('HISTORY/CURRENT_FILENAME'):
-			self.currentFileName = elem.text
-		for elem in self.xml.iterfind('TRACK_LIST/TRACK_COUNT'):
-			self.trackCount = int(elem.text)
-		if self.trackCount > 1: #polywav detected
-			if self.currentFileName[-5:].lower() == self.originalFileName[-5:].lower(): #genuine polywav
-				self.polywav = 1
-			else: #polywav that's been split
-				self.interleaveIndex = int(self.originalFileName[-6:][:2].replace('_',''))
-		#determine track number, track name, fileId
-		if self.polywav == 1:
-			self.fileId = originalFileName
-			self.trackNumber = 'N/A'
-			self.trackName =  'polywav'
-		else:
-			self.fileId = determineFileId(self.originalFileName)
-			self.trackNumber = xmlRead(self.xml, self.interleaveIndex, 'CHANNEL_INDEX')
-			self.trackName = xmlRead(self.xml, self.interleaveIndex, 'NAME').replace(' ','_')
-			
-	def newFileName(self, nameOrder):
-		if self.polywav == 1:
-			return 'please convert first'
-		else:
-			if nameOrder == 1:
-				return self.trackName + '_' + self.fileId + '_' + self.trackNumber + '.WAV'
-			else:
-				return self.fileId + '_' + self.trackName + '_' + self.trackNumber + '.WAV'
-				
 
-class filesList():
-	def __init__(self, directory):
-		self.list = []
-		self.directory = directory
-		self.tree = ttk.Treeview(root)
-		self.tree['height'] = 20
-		self.tree['columns'] = ('Track No.', 'Track Name', 'New Filename')
-		self.tree.column('Track No.', width = 100, anchor = 'center')
-		self.tree.column('Track Name', width = 200, anchor = 'w')
-		self.tree.heading('#0', text = 'Filename')
-		self.tree.heading('Track No.', text = 'Track No.')
-		self.tree.heading('Track Name', text = 'Track Name')
-		self.tree.heading('New Filename', text = 'New Filename')
-		
-	def clear(self):
-		self.list = []
-		directoryField.configure(state = 'normal')
-		directoryField.delete('1.0', END)
-		directoryField.configure(state = 'disabled')
-		for i in self.tree.get_children():
-			self.tree.delete(i)
-			
-	def load(self, directory):
-		self.directory = directory
-		directoryField.configure(state = 'normal')
-		directoryField.insert('end', directory)
-		directoryField.configure(state = 'disabled')
-		for x in os.listdir(directory):
-			if x[-4:].lower() == '.wav':
-				self.list.append(wavFile(x, directory))
-		for x in self.list:
-			self.tree.insert('', 0, text = x.originalFileName, values=(x.trackNumber, x.trackName, x.newFileName(nameOrder.get())))
-	
-def directorySelect():
-	files.clear()
-	directory = tkFileDialog.askdirectory(title = 'Select directory containing files')
-	if directory:
-		files.load(directory)
-	return
+class WavFile(object):
+    def __init__(self, originalFileName, directory):
+        self._originalFileName = originalFileName
+        self._directory = directory
+        self._channels = None
+        self._xml = None
+        self._badWav = self._xmlExtract() # badWav (1 = xmlError, 2 = problem with WAV)
+        if self._badWav == 0: # can we read the xml?
+            self._tracks = [ None ] * self._channels
+            for i in range(self._channels):
+                if self._channels == 1:
+                    interleaveIndex = self._polywavSplitTest()
+                else:
+                    interleaveIndex = i + 1
+                self._tracks[i] = Track(self._xml, interleaveIndex)
 
-def nameOrderToggle():
-	directory = files.directory
-	files.clear()
-	files.load(directory)
-	
-def execute():
-	if len(files.list) == 0:
-		tkMessageBox.showwarning('Error','No files to rename.')
-		return
-	if copy.get() == 1:
-		parentPath, folderName = os.path.split(files.directory)
-		newPath = os.path.join(parentPath, folderName + ' rename')
-		if not os.path.exists(newPath):
-			os.makedirs(newPath)
-		else:
-			tkMessageBox.showwarning('Error', 'Duplicate folder \'' + folderName + ' rename\'' + ' seems to already exist.\nNo files copied.')
-		for x in files.list:
-			if x.polywav == 0:
-				shutil.copyfile((os.path.join(x.directory, x.originalFileName)), (os.path.join(newPath, x.newFileName(nameOrder.get()))))
-	else:
-		for x in files.list:
-			if x.polywav == 0:
-				os.rename(os.path.join(x.directory, x.originalFileName), os.path.join(x.directory, x.newFileName(nameOrder.get())))
-	files.clear()
-	
-	
+    def __str__(self):
+        return self._originalFileName
 
-def xmlExtract(file):
-	openfile = open(file, 'rb')
-	stream = openfile.read(5000)
-	openfile.close()
-	headerData = stream.decode('utf-8', 'ignore')
-	return '<?xml version' + headerData.split('<?xml version',1)[1]
-	
-def xmlRead(xml, interleaveIndex, tag):
-	return xml.find('.//TRACK[INTERLEAVE_INDEX="' + str(interleaveIndex) + '"]/' + tag).text
-	
-def determineFileId(fileName):
-	#work backwards to '_'
-	trimLength = len(fileName)
-	for l in fileName[::-1]:
-		trimLength -= 1
-		if l == '_':
-			break
-	id = fileName[:trimLength]
-	return id
-	
+    def _xmlExtract(self):
+        try:
+            file = (os.path.join(self._directory, self._originalFileName))
+            wavfile = BWFwave.open(file, 'rb')
+            self._channels = wavfile.getnchannels()
+            headerData = wavfile.getixml()
+            wavfile.close()
+            # let's parse naughty xmls containing '&' characters
+            headerData = headerData.replace(b'&amp;', b'&')
+            headerData = headerData.replace(b'&', b'&amp;')
+        except:
+            return 2
+        try:
+            self._xml = ET.ElementTree(ET.fromstring(headerData))
+        except:
+            return 1
+        return 0
+
+    def _fileId(self):
+        # work backwards to '_'
+        trimLength = len(self._originalFileName)
+        for l in self._originalFileName[::-1]:
+            trimLength -= 1
+            if l == '_':
+                break
+        if trimLength == 0:
+            return(self._originalFileName[:-4])
+        else:
+            return(self._originalFileName[:trimLength])
+
+    # in cases where BWFManager or equivalent has separated polywavs into individual files
+    # an interleaveIndex is returned.
+    def _polywavSplitTest(self):
+        for elem in self._xml.iterfind('TRACK_LIST/TRACK_COUNT'):
+            trackCount = int(elem.text)
+        if trackCount > 1:
+            return int(self._originalFileName[-6:][:2].replace('_', ''))
+        else:
+            return 1
+
+    def getNewFileName(self, channel, style):
+        if self._badWav == 1:
+            return 'Problem reading XML'
+        if self._badWav == 2:
+            return 'Problem reading WAV'
+        else:
+            if style == 0:
+                return self._fileId() + '_' + self._tracks[channel].getName() + '_'\
+                       + self._tracks[channel].getChannel() + '.WAV'
+            if style == 1:
+                return self._tracks[channel].getName() + '_' + self._fileId() + '_'\
+                       + self._tracks[channel].getChannel() + '.WAV'
+            if style == 2:
+                return self._originalFileName[:-4] + '_' + self._tracks[channel].getChannel() + '.WAV'
+
+    def getBadWav(self):
+        return self._badWav
+
+    def getChannels(self):
+        return self._channels
+
+    def getOriginalFileName(self):
+        return self._originalFileName
+
+    def getDirectory(self):
+        return self._directory
+
+    def getTrack(self, track):
+        return self._tracks[track]
+
+
+class Track(object):
+    def __init__(self, xml, interleaveIndex):
+        self._xml = xml
+        self._interleaveIndex = interleaveIndex
+        self._channel = self._xmlRead('CHANNEL_INDEX')
+        self._name = self._xmlRead('NAME')
+
+    def _xmlRead(self, tag):
+        return self._xml.find('.//TRACK[INTERLEAVE_INDEX="' + str(self._interleaveIndex) + '"]/' + tag).text
+
+    def getChannel(self):
+        return self._channel
+
+    def getName(self):
+        return self._name
+
+
+class FilesList(object):
+    def __init__(self, caller):
+        self._list = []
+        self._directory = ''
+        self._newDirectory = None
+        self._caller = caller
+
+    def getList(self):
+        return self._list
+
+    def getFile(self, x):
+        return self._list[x]
+
+    def __len__(self):
+        return len(self._list)
+
+    def getDirectory(self):
+        return self._directory
+
+    def setNewDirectory(self, newdir):
+        self._newDirectory = newdir
+        self._caller.clearTargetDirectoryField()
+        self._caller.setTargetDirectoryField(newdir)
+
+    def clear(self):
+        self._list = []
+        self._directory = ''
+        self._newDirectory = self._directory
+        self._caller.clear()
+
+    def load(self, directory):
+        self._directory = directory
+        for x in sorted(os.listdir(self._directory)):
+            if x[-4:].lower() == '.wav' and x[:2] != '._':
+                self._list.append(WavFile(x, self._directory))
+        self._caller.load(self._directory, self._list)
+
+    def directorySelect(self):
+        self.clear()
+        directoryAsk = filedialog.askdirectory(title='Select directory containing files')
+        if directoryAsk:
+            popup = ProgressPopup(self._caller.master, 'Loading...')
+            popup.progressBar['value'] = 5000
+            popup.update()
+            self.load(directoryAsk)
+            popup.cancel(popup)
+
+    def targetSelect(self):
+        if self._caller.copy.get() == 0:
+            messagebox.showwarning('Error', 'Files set to be renamed in their current directory. \n'
+                                            + 'Choose \'copy files\' to select a new target.')
+            return
+        directoryAsk = filedialog.askdirectory(title='Select target directory')
+        if directoryAsk:
+            self.setNewDirectory(directoryAsk)
+
+    def execute(self):
+        style = self._caller.style()
+        copy = self._caller.copy.get()
+        success = 0
+        if len(self) == 0 or any(x for x in self._list if x.getBadWav() != 0):
+            messagebox.showerror('Error', 'No files to rename.')
+            return
+        if copy == 1:
+            if not self._newDirectory:
+                messagebox.showerror('Error', 'No target directory selected.')
+                return
+            if self._newDirectory == self._directory:
+                if not messagebox.askokcancel('Alert', 'Target folder for copies is the same as source folder. \n'
+                                                'Are you sure?'):
+                    return
+            popup = ProgressPopup(self._caller.master, 'Copying files...')
+            popup.update()
+            for x, wavFile in enumerate(self._list):
+                popup.progressBar['value'] = (10000 / len(self._list)) * x
+                popup.setFileLabel(wavFile.getNewFileName(0, style))
+                popup.update()
+                if wavFile.getBadWav() == 0:
+                    if wavFile.getChannels() == 1:
+                        try:
+                            shutil.copyfile((os.path.join(wavFile.getDirectory(), wavFile.getOriginalFileName())),
+                                    (os.path.join(self._newDirectory, wavFile.getNewFileName(0, style))))
+                        except Exception as e:
+                            messagebox.showwarning('Error', 'Unable to copy ' + wavFile.getOriginalFileName() + '\n'
+                                                   + str(e) + '\nAborting...')
+                            break
+                    else:
+                        try:
+                            for y in range(wavFile.getChannels()):
+                                splitPolywav(wavFile, y, self._newDirectory, wavFile.getNewFileName(y, style))
+                                popup.setFileLabel(wavFile.getNewFileName(y, style))
+                                popup.progressBar['value'] = ((10000 / len(self._list)) * x) \
+                                                             + (10000 / len(self._list)) / (wavFile.getChannels()) * y
+                                popup.update()
+                        except Exception as e:
+                            messagebox.showwarning('Error', 'Unable to perform split. \n' + str(e))
+                            break
+                success = 1
+            popup.cancel()
+        else:
+            for wavFile in self._list:
+                if wavFile.getBadWav() == 0:
+                    try:
+                        os.rename(os.path.join(wavFile.getDirectory(), wavFile.getOriginalFileName()),
+                                  os.path.join(wavFile.getDirectory(), wavFile.getNewFileName(0, style)))
+                    except Exception as e:
+                        messagebox.showwarning('Error', 'Unable to rename ' + wavFile.getOriginalFileName() + '\n'
+                                               + str(e) + '\nAborting...')
+                        break
+            success = 1
+        if success == 1:
+            messagebox.showinfo('Success', 'Operation complete.')
+        self.clear()
+
+
+# method for splitting a polywav into an individual file
+def splitPolywav(wavFile, channel, newPath, newFileName):
+    sourcewav = BWFwave.open(os.path.join(wavFile.getDirectory(), wavFile.getOriginalFileName()))
+    depth = sourcewav.getsampwidth()
+    sourcedata = sourcewav.readframes(sourcewav.getnframes())
+    sourcewav.setpos(0)
+    data = np.frombuffer(sourcedata, dtype='V' + str(depth))
+    channeldata = data[channel::wavFile.getChannels()]
+    outwav = BWFwave.open(os.path.join(newPath, newFileName), 'w')
+    outwav.setparams(sourcewav.getparams())
+    outwav.setnchannels(1)
+    outwav.setnframes(sourcewav.getnframes())
+    outwav.setbext(sourcewav.getbext())
+    outwav.setixml(sourcewav.getixml())
+    outwav.writeframesraw(channeldata.tostring())
+    outwav.close()
+    sourcewav.close()
+
 
 # start of launch code
 
 root = Tk()
-root.title('bwfwavrename')
+root.title('BWFWAVrename')
 
-files = filesList([])
-nameOrder = IntVar()
-copy = IntVar()
+class MainWindow(Frame):
+    def __init__(self, master=None):
+        Frame.__init__(self, master)
+        self.files = FilesList(self)
+        self.nameOrder = IntVar()
+        self.copy = IntVar()
+        self.justTrack = IntVar()
+        # graphical elements
+        self.directoryLabel = Label(master, text='Folder containing wavs:')
+        self.directoryField = Text(master, width=100, height=1, state='disabled', relief='solid', borderwidth=1)
+        self.targetDirectoryLabel = Label(master, text='Target folder:')
+        self.targetDirectoryField = Text(master, width=100, height=1, state='disabled', relief='solid', borderwidth=1)
+        self.browseDirectoryButton = Button(master, text='Select Source Folder', command=self.files.directorySelect)
+        self.browseTargetButton = Button(master, text='Select Target Folder', command=self.files.targetSelect)
+        self.aboutButton = Button(master, text='About...', command=self.about)
+        self.executeButton = Button(master, text='Execute', command=self.files.execute, width=10)
+        self.clearButton = Button(master, text='Clear List', command=self.files.clear, width=10)
+        self.nameOrderCheck = Checkbutton(master, text='Track name at start of file name',
+                                          command=self.refresh, variable=self.nameOrder)
+        self.nameOrderCheck.select()
+        self.justTrackCheck = Checkbutton(master, text='Just add a track number (no rename)',
+                                          command=self.justTrackToggle, variable=self.justTrack)
+        self.copyCheck = Checkbutton(master, text='Copy files and leave originals untouched '
+                                                  '(mandatory with polywavs)', variable=self.copy)
+        self.tree = ttk.Treeview(master)
+        self.tree['height'] = 25
+        self.tree['columns'] = ('Track No.', 'Track Name', 'New Filename')
+        self.tree.column('#0', width=250, anchor='w')
+        self.tree.column('Track No.', width=80, anchor='center')
+        self.tree.column('Track Name', width=150, anchor='w')
+        self.tree.column('New Filename', width=350, anchor='w')
+        self.tree.heading('#0', text='Filename')
+        self.tree.heading('Track No.', text='Track No.')
+        self.tree.heading('Track Name', text='Track Name')
+        self.tree.heading('New Filename', text='New Filename')
+        self.vsb = ttk.Scrollbar(master, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.vsb.set)
 
-# graphical elements
-directoryLabel = Label(root, text='Folder containing wavs:')
-directoryField = Text(root, width = 80, height = 1, state = 'disabled', relief = 'solid', borderwidth = 1)
-browseButton = Button(root, text = 'Browse', command = directorySelect, width = 10)
-executeButton = Button(root, text = 'Execute', command = execute, width = 10)
-nameOrderCheck = Checkbutton(root, text='Track name at start of file name', command = nameOrderToggle, variable=nameOrder)
-nameOrderCheck.select()
-copyCheck = Checkbutton(root, text='Create a duplicate folder and leave original folder untouched', variable=copy)
+        # place graphical elements
+        self.directoryLabel.grid(row=1, column=1, columnspan=3, sticky=E, padx=10, pady=10)
+        self.directoryField.grid(row=1, column=4, columnspan=3, sticky=W, padx=10, pady=10)
+        self.browseDirectoryButton.grid(row=2, column=1, columnspan=2, sticky=E)
+        self.tree.grid(row=3, column=1, columnspan=6, padx=10, pady=10)
+        self.vsb.place(x=915, y=82, height=472)
+        self.nameOrderCheck.grid(row=4, column=1, columnspan=6, sticky=W, padx=10)
+        self.justTrackCheck.grid(row=5, column=1, columnspan=6, sticky=W, padx=10)
+        self.copyCheck.grid(row=6, column=1, columnspan=6, sticky=W, padx=10)
+        self.executeButton.grid(row=8, column=6, sticky=E, padx=10, pady=10)
+        self.targetDirectoryLabel.grid(row=7, column=1, columnspan=3, sticky=E, padx=10, pady=10)
+        self.targetDirectoryField.grid(row=7, column=4, columnspan=3, sticky=W, padx=10, pady=10)
+        self.browseTargetButton.grid(row=8, column=1, columnspan=2, sticky=E, padx=10)
+        self.aboutButton.grid(row=8, column=3, columnspan=1, sticky=E, padx=10)
+        self.clearButton.grid(row=8, column=5, sticky=E, padx=10, pady=10)
 
-# place graphical elements
-directoryLabel.grid(row = 1, column = 1, columnspan = 3, sticky = E, padx = 10, pady = 10)
-directoryField.grid(row = 1, column = 4, columnspan = 3, sticky = W, padx = 10, pady = 10)
-browseButton.grid(row = 2, column = 1, sticky = E)
-files.tree.grid(row = 3, column = 1, columnspan = 6, padx = 10, pady = 10)
-nameOrderCheck.grid(row =4, column = 1, columnspan = 6, sticky = W, padx = 10)
-copyCheck.grid(row =5, column = 1, columnspan = 6, sticky = W, padx = 10)
-executeButton.grid(row = 6, column = 6, sticky = E, padx = 10, pady = 10)
+    def load(self, directory, list):
+        self.setDirectoryField(directory)
+        for x in list:
+            if x.getBadWav() > 0:
+                id = self.tree.insert('', 'end', text=x.getOriginalFileName(),
+                                      values=('N/A', 'Error', x.getNewFileName(0, self.style())))
+                continue
+            if x.getChannels() == 1:
+                id = self.tree.insert('', 'end', text=x.getOriginalFileName(),
+                                      values=(x.getTrack(0).getChannel(), x.getTrack(0).getName(),
+                                              x.getNewFileName(0, self.style())))
+            else:
+                self.copyCheck.select()
+                self.copyCheck.configure(state='disabled')
+                for y in range(x.getChannels()):
+                    if y == 0:
+                        id = self.tree.insert('', 'end', text=x.getOriginalFileName())
+                        self.tree.item(id, open=TRUE)
+                    self.tree.insert(id, 'end', text=(x.getOriginalFileName() + '_' + x.getTrack(y).getChannel()),
+                                     values=(x.getTrack(y).getChannel(), x.getTrack(y).getName(),
+                                             x.getNewFileName(y, self.style())))
+
+    def clear(self):
+        self.clearDirectoryField()
+        self.clearTargetDirectoryField()
+        self.copyCheck.deselect()
+        self.copyCheck.configure(state='normal')
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+
+    def refresh(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        self.load(self.files.getDirectory(), self.files.getList())
+
+    def justTrackToggle(self):
+        if self.justTrack.get() == 1:
+            self.nameOrderCheck.configure(state='disabled')
+        else:
+            self.nameOrderCheck.configure(state='normal')
+        self.refresh()
+
+    def style(self):  #read the checkboxes
+        if self.justTrack.get() == 1:
+            return 2
+        if self.nameOrder.get() == 1:
+            return 1
+        else:
+            return 0
+
+    def setDirectoryField(self, text):
+        self.directoryField.configure(state='normal')
+        self.directoryField.insert('end', text)
+        self.directoryField.configure(state='disabled')
+
+    def clearDirectoryField(self):
+        self.directoryField.configure(state='normal')
+        self.directoryField.delete('1.0', END)
+        self.directoryField.configure(state='disabled')
+
+    def setTargetDirectoryField(self, text):
+        self.targetDirectoryField.configure(state='normal')
+        self.targetDirectoryField.insert('end', text)
+        self.targetDirectoryField.configure(state='disabled')
+
+    def clearTargetDirectoryField(self):
+        self.targetDirectoryField.configure(state='normal')
+        self.targetDirectoryField.delete('1.0', END)
+        self.targetDirectoryField.configure(state='disabled')
+
+    def about(self):
+        AboutPopup(self.master)
 
 
-# if directory provided as argument at launch
-if len(sys.argv) > 1:
-	files.load(os.path.abspath(sys.argv[1]))
+class ProgressPopup(Toplevel):
+    def __init__(self, master, title):
+        Toplevel.__init__(self, master)
+        self.overrideredirect(1)
+        self.transient(master)
+        self.master = master
+        body = Frame(self)
+        self.initial_focus = self.body(body)
+        body.pack(padx=5, pady=5)
 
-root.mainloop()
+        self.Title = Label(body, text=title)
+        self.Title.grid(row=0, column=0)
+        self.progressBar = ttk.Progressbar(body, length=500, maximum=10000, mode='determinate')
+        self.progressBar.grid(row=1, column=0)
+        self.fileLabel = Label(body, text=' ')
+        self.fileLabel.grid(row=2, column=0)
+
+        self.grab_set()
+        if not self.initial_focus:
+            self.initial_focus = self
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.geometry("+%d+%d" % (master.winfo_rootx() + 100, master.winfo_rooty() + 200))
+        self.initial_focus.focus_set()
+        self.wait_visibility(window=None)
+    #
+    # construction hooks
+    def body(self, master):
+        # create dialog body.  return widget that should have
+        # initial focus.  this method should be overridden
+        pass
+
+    def cancel(self, event=None):
+        # put focus back to the parent window
+        self.master.focus_set()
+        self.destroy()
+
+    def setFileLabel(self, file):
+        self.fileLabel['text'] = file
+
+    def setTitle(self, title):
+        self.Title['text'] = title
+
+
+class AboutPopup(Toplevel):
+    def __init__(self, master):
+        Toplevel.__init__(self, master)
+        self.overrideredirect(1)
+        self.transient(master)
+        self.master = master
+        body = Frame(self)
+        self.initial_focus = self.body(body)
+        body.pack(padx=5, pady=5)
+        self.Title = Label(body, text='About BWFWAVrename')
+        self.Title.pack()
+        self.content = Text(body, width=100, height=25)
+        self.content.pack()
+        self.content.insert(END, 'App to help us get track names on to our edit timelines. \n\n'
+                                 'Avid Media Composer currently does not bring in track labels from '
+                                 'BWF Wave files in such a way that they can be seen on the timeline.\n\n'
+                                 'As a work around, if the filename contains the track name, we can identify '
+                                 'what is on our timeline.\n\n'
+                                 'This app will read the iXML data embedded in the BWF Wave File and rename '
+                                 'the files accordingly.\n\n'
+                                 'If the file is a polywav (with many channels), the app will split the polywav '
+                                 'into several\n files that can be imported into Avid.\n\n'
+                                 'The app also ensures that channels are correctly identifiable by Avid by ending '
+                                 'each file with the\n channel number chosen by the sound recordist.\n\n'
+                                 'For best results disable the following options in Media Composer\'s import:\n'
+                                 '\'Use Broadcast Wave Scene and Take for Clip Names\'\n'
+                                 '\'Autodetect Broadcast Wave Monophonic Groups\'\n\n'
+                                 'Please support the project by donating if you find this app useful and send any ' 
+                                 'problem files or\n comments to lex@lextv.uk - Thanks!\n\n'
+                                 '(c) Lex Nichol, 2019')
+        self.content.configure(state='disabled')
+        self.Ok = Button(body, text='Ok', command=self.cancel, width=10)
+        self.Ok.pack()
+        self.grab_set()
+        if not self.initial_focus:
+            self.initial_focus = self
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.geometry("+%d+%d" % (master.winfo_rootx() + 60, master.winfo_rooty() + 60))
+        self.initial_focus.focus_set()
+        self.wait_visibility(window=None)
+    #
+    # construction hooks
+    def body(self, master):
+        # create dialog body.  return widget that should have
+        # initial focus.  this method should be overridden
+        pass
+
+    def cancel(self, event=None):
+        # put focus back to the parent window
+        self.master.focus_set()
+        self.destroy()
+
+app = MainWindow(master=root)
+app.mainloop()
