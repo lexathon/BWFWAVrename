@@ -1,3 +1,5 @@
 .DS_Store
 setup.py
 __pycache__
+build
+dist
