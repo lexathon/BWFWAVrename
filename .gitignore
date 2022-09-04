@@ -1,5 +1,8 @@
 .DS_Store
 setup.py
 __pycache__
-build
+/build/
 dist
+/.eggs/
+/BWFWAVrename.egg-info/
+/venv/
