@@ -40,6 +40,8 @@ class WavFile(object):
             # let's parse naughty xmls containing '&' characters
             headerData = headerData.replace(b'&amp;', b'&')
             headerData = headerData.replace(b'&', b'&amp;')
+            # lose any binary guff at the end (some files need this)
+            headerData = headerData.decode('ascii').rstrip('\x00\x02')
         except:
             return 2
         try:
@@ -100,6 +102,9 @@ class WavFile(object):
     def getTrack(self, track):
         return self._tracks[track]
 
+    def getFileId(self):
+        return self._fileId()
+
 
 class Track(object):
     def __init__(self, xml, interleaveIndex):
@@ -149,11 +154,41 @@ class FilesList(object):
         self._caller.clear()
 
     def load(self, directory):
-        self._directory = directory
+        if directory:
+            self._directory = directory
         for x in sorted(os.listdir(self._directory)):
-            if x[-4:].lower() == '.wav' and x[:2] != '._':
-                self._list.append(WavFile(x, self._directory))
-        self._caller.load(self._directory, self._list)
+            if x[-4:].lower() != '.wav' or x[:2] == '._':
+                continue
+            wavFile = WavFile(x, self._directory)
+            self._list.append(wavFile) # add it to the files list
+            if wavFile.getBadWav() > 0:
+                id = self._caller.treeInsert(None, wavFile.getOriginalFileName(),
+                                             'N/A',
+                                             'Error',
+                                             wavFile.getNewFileName(0, self._caller.getStyle())
+                                             )
+                continue
+            if wavFile.getChannels() == 1:
+                id = self._caller.treeInsert(None, wavFile.getOriginalFileName(),
+                                             wavFile.getTrack(0).getChannel(),
+                                             wavFile.getTrack(0).getName(),
+                                             wavFile.getNewFileName(0, self._caller.getStyle())
+                                             )
+            else:
+                self._caller.selectCopyCheck()
+                self._caller.disableCopyCheck()
+                for y in range(wavFile.getChannels()):
+                    if y == 0:
+                        id = self._caller.treeInsert(None, wavFile.getOriginalFileName(),
+                                                     '',
+                                                     '',
+                                                     '**polywav')
+                        self._caller.treeOpen(id)
+                    self._caller.treeInsert(id, wavFile.getFileId() + '_' + wavFile.getTrack(y).getChannel(),
+                                                 wavFile.getTrack(y).getChannel(),
+                                                 wavFile.getTrack(y).getName(),
+                                                 wavFile.getNewFileName(y, self._caller.getStyle())
+                                                 )
 
     def directorySelect(self):
         self.clear()
@@ -166,7 +201,7 @@ class FilesList(object):
             popup.cancel(popup)
 
     def targetSelect(self):
-        if self._caller.copy.get() == 0:
+        if self._caller.getCopy() == 0:
             messagebox.showwarning('Error', 'Files set to be renamed in their current directory. \n'
                                             + 'Choose \'copy files\' to select a new target.')
             return
@@ -175,8 +210,8 @@ class FilesList(object):
             self.setNewDirectory(directoryAsk)
 
     def execute(self):
-        style = self._caller.style()
-        copy = self._caller.copy.get()
+        style = self._caller.getStyle()
+        copy = self._caller.getCopy()
         success = 0
         if len(self) == 0 or any(x for x in self._list if x.getBadWav() != 0):
             messagebox.showerror('Error', 'No files to rename.')
@@ -311,40 +346,29 @@ class MainWindow(Frame):
         self.aboutButton.grid(row=8, column=3, columnspan=1, sticky=E, padx=10)
         self.clearButton.grid(row=8, column=5, sticky=E, padx=10, pady=10)
 
-    def load(self, directory, list):
-        self.setDirectoryField(directory)
-        for x in list:
-            if x.getBadWav() > 0:
-                id = self.tree.insert('', 'end', text=x.getOriginalFileName(),
-                                      values=('N/A', 'Error', x.getNewFileName(0, self.style())))
-                continue
-            if x.getChannels() == 1:
-                id = self.tree.insert('', 'end', text=x.getOriginalFileName(),
-                                      values=(x.getTrack(0).getChannel(), x.getTrack(0).getName(),
-                                              x.getNewFileName(0, self.style())))
-            else:
-                self.copyCheck.select()
-                self.copyCheck.configure(state='disabled')
-                for y in range(x.getChannels()):
-                    if y == 0:
-                        id = self.tree.insert('', 'end', text=x.getOriginalFileName())
-                        self.tree.item(id, open=TRUE)
-                    self.tree.insert(id, 'end', text=(x.getOriginalFileName() + '_' + x.getTrack(y).getChannel()),
-                                     values=(x.getTrack(y).getChannel(), x.getTrack(y).getName(),
-                                             x.getNewFileName(y, self.style())))
+    def treeInsert(self, id, originalFileName, track, name, newFileName):
+        if not id:
+            id = ''
+        return self.tree.insert(id, 'end', text=originalFileName, values=(track, name, newFileName))
+
+    def treeOpen(self, id):
+        self.tree.item(id, open=TRUE)
+
+    def treeClear(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+
 
     def clear(self):
         self.clearDirectoryField()
         self.clearTargetDirectoryField()
-        self.copyCheck.deselect()
-        self.copyCheck.configure(state='normal')
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        self.deselectCopyCheck()
+        self.enableCopyCheck()
+        self.treeClear()
 
     def refresh(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        self.load(self.files.getDirectory(), self.files.getList())
+        self.treeClear()
+        self.files.load(None)
 
     def justTrackToggle(self):
         if self.justTrack.get() == 1:
@@ -353,13 +377,31 @@ class MainWindow(Frame):
             self.nameOrderCheck.configure(state='normal')
         self.refresh()
 
-    def style(self):  #read the checkboxes
+    def getStyle(self):  #read the checkboxes
         if self.justTrack.get() == 1:
             return 2
         if self.nameOrder.get() == 1:
             return 1
         else:
             return 0
+
+    def getCopy(self):
+        return self.copy.get()
+
+    def selectCopyCheck(self):
+        self.copyCheck.select()
+
+    def deselectCopyCheck(self):
+        self.copyCheck.deselect()
+
+    def disableCopyCheck(self):
+        self.copyCheck.configure(state='disabled')
+
+    def enableCopyCheck(self):
+        self.copyCheck.configure(state='normal')
+
+    def getJustTrack(self):
+        return self.justTrack.get()
 
     def setDirectoryField(self, text):
         self.directoryField.configure(state='normal')
