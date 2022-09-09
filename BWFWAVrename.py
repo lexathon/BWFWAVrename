@@ -553,7 +553,7 @@ class AboutPopup(Toplevel):
         self.geometry("+%d+%d" % (master.winfo_rootx() + 60, master.winfo_rooty() + 60))
         self.initial_focus.focus_set()
         self.wait_visibility(window=None)
-        self.lift
+        self.lift()
     #
     # construction hooks
     def body(self, master):
