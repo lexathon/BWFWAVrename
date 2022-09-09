@@ -43,6 +43,9 @@ class WavFile(object):
             headerData = headerData.replace(b'&', b'&amp;')
             # lose any binary guff at the end (some files need this)
             headerData = headerData.decode('ascii').rstrip('\x00\x02')
+            # take header data up to end of XML - deals with other weirdness on some files:-
+            sep = "</BWFXML>"
+            headerData = headerData.split(sep, 1)[0] + sep
         except:
             return 2
         try:
@@ -217,6 +220,10 @@ class FilesList(object):
         style = self._caller.getStyle()
         copy = self._caller.getCopy()
         success = 0
+        for x in self._list:
+            if x.getBadWav() != 0:
+                print(x)
+                print(x.getBadWav())
         if len(self) == 0 or any(x for x in self._list if x.getBadWav() != 0):
             messagebox.showerror('Error', 'No files to rename.')
             return
@@ -517,7 +524,8 @@ class AboutPopup(Toplevel):
         self.Title.pack()
         self.content = Text(body, width=100, height=25)
         self.content.pack()
-        self.content.insert(END, 'App to help us get track names on to our edit timelines. \n\n'
+        self.content.insert(END, 'v0.8b. \n\n'
+                                 'App to help us get track names on to our edit timelines. \n\n'
                                  'Avid Media Composer currently does not bring in track labels from '
                                  'BWF Wave files in such a way that they can be seen on the timeline.\n\n'
                                  'As a work around, if the filename contains the track name, we can identify '
@@ -533,7 +541,8 @@ class AboutPopup(Toplevel):
                                  '\'Autodetect Broadcast Wave Monophonic Groups\'\n\n'
                                  'Please support the project by donating if you find this app useful and send any ' 
                                  'problem files or\n comments to lex@lextv.uk - Thanks!\n\n'
-                                 '(c) Lex Nichol, 2019')
+                                 'Latest version is available at https://github.com/lexathon/BWFWAVrename \n\n'
+                                 '(c) Lex Nichol, 2019-2022')
         self.content.configure(state='disabled')
         self.Ok = Button(body, text='Ok', command=self.cancel, width=10)
         self.Ok.pack()
@@ -544,6 +553,7 @@ class AboutPopup(Toplevel):
         self.geometry("+%d+%d" % (master.winfo_rootx() + 60, master.winfo_rooty() + 60))
         self.initial_focus.focus_set()
         self.wait_visibility(window=None)
+        self.lift
     #
     # construction hooks
     def body(self, master):
